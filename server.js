@@ -6,6 +6,8 @@ const path = require('path');
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.ANTHROPIC_API_KEY;
 const DB_PATH = path.join(__dirname, 'data', 'db.json');
+const BACKUP_DIR = path.join(__dirname, 'data', 'backups');
+const MAX_BACKUPS = 30; // mantém os últimos 30 dias
 
 // ═══════════════════════════════════════════════
 // BANCO DE DADOS SIMPLES EM ARQUIVO JSON
@@ -30,6 +32,81 @@ function lerDB() {
 
 function salvarDB(db) {
   fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
+}
+
+// ═══════════════════════════════════════════════
+// BACKUP AUTOMÁTICO DIÁRIO
+// ═══════════════════════════════════════════════
+function garantirPastaBackup() {
+  if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
+}
+
+function fazerBackup() {
+  try {
+    garantirPastaBackup();
+    const db = lerDB();
+    const dataHoje = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+    const arquivoBackup = path.join(BACKUP_DIR, `backup-${dataHoje}.json`);
+
+    // Só faz backup se ainda não existe um de hoje (evita sobrescrever com dados vazios em restarts múltiplos)
+    if (fs.existsSync(arquivoBackup)) {
+      console.log(`Backup de hoje já existe: ${dataHoje}`);
+      return;
+    }
+
+    fs.writeFileSync(arquivoBackup, JSON.stringify({
+      dataBackup: new Date().toISOString(),
+      totalMembros: db.membros.length,
+      db
+    }, null, 2));
+    console.log(`✓ Backup criado: backup-${dataHoje}.json (${db.membros.length} membros)`);
+
+    limparBackupsAntigos();
+  } catch (err) {
+    console.error('Erro ao criar backup:', err.message);
+  }
+}
+
+function limparBackupsAntigos() {
+  try {
+    garantirPastaBackup();
+    const arquivos = fs.readdirSync(BACKUP_DIR)
+      .filter(f => f.startsWith('backup-') && f.endsWith('.json'))
+      .sort(); // ordem alfabética = ordem cronológica (formato YYYY-MM-DD)
+
+    if (arquivos.length > MAX_BACKUPS) {
+      const paraRemover = arquivos.slice(0, arquivos.length - MAX_BACKUPS);
+      paraRemover.forEach(f => fs.unlinkSync(path.join(BACKUP_DIR, f)));
+      console.log(`Removidos ${paraRemover.length} backups antigos`);
+    }
+  } catch (err) {
+    console.error('Erro ao limpar backups antigos:', err.message);
+  }
+}
+
+function listarBackups() {
+  garantirPastaBackup();
+  return fs.readdirSync(BACKUP_DIR)
+    .filter(f => f.startsWith('backup-') && f.endsWith('.json'))
+    .sort()
+    .reverse() // mais recente primeiro
+    .map(f => {
+      const stat = fs.statSync(path.join(BACKUP_DIR, f));
+      return { arquivo: f, tamanho: stat.size, data: f.replace('backup-','').replace('.json','') };
+    });
+}
+
+function lerBackup(nomeArquivo) {
+  garantirPastaBackup();
+  const caminho = path.join(BACKUP_DIR, nomeArquivo);
+  if (!fs.existsSync(caminho)) throw new Error('Backup não encontrado');
+  return JSON.parse(fs.readFileSync(caminho, 'utf-8'));
+}
+
+// Agenda o backup: roda a cada 6 horas, mas só grava 1x por dia (ver fazerBackup)
+function agendarBackups() {
+  fazerBackup(); // backup imediato ao iniciar o servidor
+  setInterval(fazerBackup, 6 * 60 * 60 * 1000); // verifica a cada 6h
 }
 
 // ═══════════════════════════════════════════════
@@ -193,6 +270,38 @@ const server = http.createServer(async (req, res) => {
       return enviarJSON(res, 200, { deleted: true });
     }
 
+    // ─── BACKUPS ───
+    if (req.method === 'GET' && pathname === '/backups') {
+      return enviarJSON(res, 200, listarBackups());
+    }
+    if (req.method === 'GET' && pathname.startsWith('/backups/')) {
+      const arquivo = decodeURIComponent(pathname.split('/')[2]);
+      try {
+        const backup = lerBackup(arquivo);
+        return enviarJSON(res, 200, backup);
+      } catch (e) {
+        return enviarJSON(res, 404, { error: e.message });
+      }
+    }
+    if (req.method === 'POST' && pathname === '/backups/criar-agora') {
+      const dataHoje = new Date().toISOString().split('T')[0];
+      const arquivoBackup = path.join(BACKUP_DIR, `backup-${dataHoje}.json`);
+      // Força novo backup mesmo se já existir um de hoje
+      if (fs.existsSync(arquivoBackup)) fs.unlinkSync(arquivoBackup);
+      fazerBackup();
+      return enviarJSON(res, 200, { status: 'Backup criado com sucesso', data: dataHoje });
+    }
+    if (req.method === 'POST' && pathname === '/backups/restaurar') {
+      const { arquivo } = await lerBody(req);
+      try {
+        const backup = lerBackup(arquivo);
+        salvarDB(backup.db);
+        return enviarJSON(res, 200, { status: 'Restaurado com sucesso', totalMembros: backup.db.membros.length });
+      } catch (e) {
+        return enviarJSON(res, 500, { error: e.message });
+      }
+    }
+
     enviarJSON(res, 404, { error: 'Rota não encontrada' });
 
   } catch (err) {
@@ -202,5 +311,7 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   garantirDB();
-  console.log(`Guardião backend v2 rodando na porta ${PORT}`);
+  garantirPastaBackup();
+  agendarBackups();
+  console.log(`Guardião backend v2 rodando na porta ${PORT} — backup automático ativo`);
 });
