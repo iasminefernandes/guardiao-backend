@@ -153,7 +153,7 @@ const server = http.createServer(async (req, res) => {
       if (!API_KEY) return enviarJSON(res, 500, { error: 'ANTHROPIC_API_KEY não configurada.' });
       const { messages } = await lerBody(req);
 
-      const payload = JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 4000, messages });
+      const payload = JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 6000, messages });
       const data = await new Promise((resolve, reject) => {
         const options = {
           hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
